@@ -1927,6 +1927,152 @@ fn minimal_mp4_get_track_info_invalid_track_number() {
 }
 
 #[test]
+fn repeated_get_track_audio_info_returns_stable_pointer() {
+    let parser = parse_minimal_mp4();
+
+    unsafe {
+        let mut audio1 = Mp4parseTrackAudioInfo::default();
+        assert_eq!(
+            Mp4parseStatus::Ok,
+            mp4parse_get_track_audio_info(parser, 1, &mut audio1)
+        );
+        assert_eq!(audio1.sample_info_count, 1);
+        let ptr1 = audio1.sample_info;
+
+        // Query the same track again — must return the cached pointer,
+        // not rebuild (which would drop the old Vec and invalidate ptr1).
+        let mut audio2 = Mp4parseTrackAudioInfo::default();
+        assert_eq!(
+            Mp4parseStatus::Ok,
+            mp4parse_get_track_audio_info(parser, 1, &mut audio2)
+        );
+        assert_eq!(audio2.sample_info_count, 1);
+        let ptr2 = audio2.sample_info;
+
+        // Pointer must be stable across calls.
+        assert_eq!(ptr1, ptr2);
+
+        // Data behind the first pointer must still be valid.
+        assert_eq!((*audio1.sample_info).channels, 1);
+        assert_eq!((*audio1.sample_info).bit_depth, 16);
+        assert_eq!((*audio1.sample_info).sample_rate, 48000);
+
+        mp4parse_free(parser);
+    }
+}
+
+// Test file: tests/opus_audioinit_two_desc.mp4
+//
+// Generated from opus_audioinit.mp4 by duplicating the Opus stsd entry so
+// the track has two sample descriptions.  The second entry has
+// channelcount = 2 and dOps output_channel_count = 2 (vs 1 in the
+// original) so the two descriptions are distinguishable.
+#[test]
+fn multi_opus_description_codec_specific_pointers_are_valid() {
+    let mut file = std::fs::File::open("tests/opus_audioinit_two_desc.mp4").expect("Unknown file");
+    let io = Mp4parseIo {
+        read: Some(valid_read),
+        userdata: &mut file as *mut _ as *mut std::os::raw::c_void,
+    };
+
+    unsafe {
+        let mut parser = std::ptr::null_mut();
+        let rv = mp4parse_new(&io, &mut parser);
+        assert_eq!(rv, Mp4parseStatus::Ok);
+
+        let mut audio = Mp4parseTrackAudioInfo::default();
+        let rv = mp4parse_get_track_audio_info(parser, 0, &mut audio);
+        assert_eq!(rv, Mp4parseStatus::Ok);
+        assert_eq!(audio.sample_info_count, 2);
+
+        let si0 = &*audio.sample_info;
+        let si1 = &*audio.sample_info.add(1);
+
+        // Both descriptions must be Opus.
+        assert_eq!(si0.codec_type, Mp4parseCodec::Opus);
+        assert_eq!(si1.codec_type, Mp4parseCodec::Opus);
+
+        // Distinguish the two entries by channel count.
+        assert_eq!(si0.channels, 1);
+        assert_eq!(si1.channels, 2);
+
+        // Both must have non-empty, non-null codec_specific_config.
+        assert!(si0.codec_specific_config.length > 0);
+        assert!(!si0.codec_specific_config.data.is_null());
+        assert!(si1.codec_specific_config.length > 0);
+        assert!(!si1.codec_specific_config.data.is_null());
+
+        // The opus_header map must have a separate entry per description.
+        let parser_ref = &*parser;
+        assert_eq!(
+            parser_ref.opus_header.len(),
+            2,
+            "opus_header must have one entry per stsd description, not per track"
+        );
+
+        // Pointers must be distinct (backed by separate opus_header entries).
+        assert_ne!(
+            si0.codec_specific_config.data,
+            si1.codec_specific_config.data
+        );
+
+        // Dereference the data to exercise the UAF under ASAN/valgrind.
+        let config0 = std::slice::from_raw_parts(
+            si0.codec_specific_config.data,
+            si0.codec_specific_config.length,
+        );
+        let config1 = std::slice::from_raw_parts(
+            si1.codec_specific_config.data,
+            si1.codec_specific_config.length,
+        );
+
+        // Serialized opus headers differ because channel counts differ.
+        assert_eq!(config0.len(), config1.len());
+        assert_ne!(config0, config1);
+
+        mp4parse_free(parser);
+    }
+}
+
+#[test]
+fn repeated_get_track_video_info_returns_stable_pointer() {
+    let parser = parse_minimal_mp4();
+
+    unsafe {
+        let mut video1 = Mp4parseTrackVideoInfo::default();
+        assert_eq!(
+            Mp4parseStatus::Ok,
+            mp4parse_get_track_video_info(parser, 0, &mut video1)
+        );
+        assert_eq!(video1.sample_info_count, 1);
+        let ptr1 = video1.sample_info;
+
+        // Query the same track again — must return the cached pointer.
+        let mut video2 = Mp4parseTrackVideoInfo::default();
+        assert_eq!(
+            Mp4parseStatus::Ok,
+            mp4parse_get_track_video_info(parser, 0, &mut video2)
+        );
+        assert_eq!(video2.sample_info_count, 1);
+        let ptr2 = video2.sample_info;
+
+        // Pointer must be stable across calls.
+        assert_eq!(ptr1, ptr2);
+
+        // Data behind the first pointer must still be valid.
+        assert_eq!((*video1.sample_info).image_width, 320);
+        assert_eq!((*video1.sample_info).image_height, 240);
+
+        // tkhd-derived fields must be populated on the cached path too
+        // (the caller zeroes info before each call).
+        assert_eq!(video2.display_width, 320);
+        assert_eq!(video2.display_height, 240);
+
+        mp4parse_free(parser);
+    }
+}
+
+#[test]
 fn parse_no_timescale() {
     let mut file = std::fs::File::open("tests/no_timescale.mp4").expect("Unknown file");
     let io = Mp4parseIo {
