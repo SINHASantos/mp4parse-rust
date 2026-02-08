@@ -166,6 +166,13 @@ impl Default for Mp4parseByteData {
 }
 
 impl Mp4parseByteData {
+    /// Populate the data pointer and length from a byte slice.
+    ///
+    /// The returned pointer borrows directly from `data`; the caller must
+    /// ensure the backing storage outlives any C code that dereferences it.
+    /// For empty slices we return a null pointer to avoid exposing Rust's
+    /// dangling empty-slice pointer (e.g. 0x1) over FFI.
+    /// See [`Mp4parseParser`] for the caching strategy that guarantees this.
     fn set_data(&mut self, data: &[u8]) {
         self.length = data.len();
         self.data = if data.is_empty() {
@@ -175,6 +182,8 @@ impl Mp4parseByteData {
         };
     }
 
+    /// For empty slices we return a null pointer to avoid exposing Rust's
+    /// dangling empty-slice pointer (e.g. 0x1) over FFI.
     fn set_indices(&mut self, data: &[Indice]) {
         self.length = data.len();
         self.indices = if data.is_empty() {
@@ -288,6 +297,24 @@ pub struct Mp4parseFragmentInfo {
     // info in trex box.
 }
 
+/// Parser state for MP4 files, exposed to C callers via raw pointer.
+///
+/// # Pointer stability
+///
+/// Several C API functions return raw pointers into data cached on this
+/// struct (e.g. sample descriptions, indice tables, PSSH data). Those
+/// pointers remain valid for the lifetime of the parser, because each
+/// getter populates its cache **at most once** per key and never replaces
+/// or reallocates the cached entry afterward.
+///
+/// If you add a new getter that hands a raw pointer to C:
+/// - Store the backing data on this struct so it lives long enough.
+/// - Return the existing cached entry when the same key is requested
+///   again; **never** unconditionally rebuild and re-insert, as the
+///   `insert` would drop the old value and invalidate the pointer C is
+///   still holding.
+/// - Add a `repeated_*` regression test that calls the getter twice and
+///   asserts pointer equality.
 #[derive(Default)]
 pub struct Mp4parseParser {
     context: MediaContext,
